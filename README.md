@@ -1,3 +1,5 @@
+**** Beta phase/Windows&Linux Not tested ****
+
 # mp3cut
 
 Cut, split or extract audio from **any audio or video file** (mp3, wav, flac, m4a, aac, ogg, opus, wma,
