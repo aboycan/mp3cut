@@ -1,4 +1,4 @@
-**** Beta phase/Windows&Linux Not tested ****
+**** Beta phase: tested on macOS and Windows; Linux not tested ****
 
 # mp3cut
 
