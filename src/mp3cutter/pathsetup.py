@@ -208,46 +208,118 @@ def _win_registry_has(d: Path) -> bool:
     return pi.dir_in_path_value(d, user) or pi.dir_in_path_value(d, system)
 
 
-def win_add(d: Path) -> Tuple[bool, str]:
-    """Append d to the *user* PATH in the registry. Returns (changed, message)."""
+def _win_state() -> dict:
+    try:
+        return json.loads(_state_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _win_state_save(state: dict) -> None:
+    sf = _state_file()
+    sf.parent.mkdir(parents=True, exist_ok=True)
+    state["version"] = __version__
+    sf.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _win_state_entries(state: dict) -> List[str]:
+    entries = list(state.get("path_entries_added") or [])
+    legacy = state.get("path_entry_added")
+    if legacy and legacy not in entries:
+        entries.insert(0, legacy)
+    return entries
+
+
+def win_add(d: Path, front: bool = False) -> Tuple[bool, str]:
+    """Add d to the *user* PATH in the registry (appended, or first with front=True)."""
     value, typ = _win_read("user")
     if pi.dir_in_path_value(d, value):
         return False, "already in user PATH"
     entry = str(d)
-    new_value = (value.rstrip(";") + ";" + entry) if value.strip() else entry
+    if not value.strip():
+        new_value = entry
+    elif front:
+        new_value = entry + ";" + value.lstrip(";")
+    else:
+        new_value = value.rstrip(";") + ";" + entry
     _win_write_user(new_value, typ)
     check, _ = _win_read("user")
     if not pi.dir_in_path_value(d, check):
         return False, "registry update could not be verified"
-    sf = _state_file()
-    sf.parent.mkdir(parents=True, exist_ok=True)
-    sf.write_text(json.dumps({"path_entry_added": entry, "version": __version__}, indent=2), encoding="utf-8")
+    state = _win_state()
+    entries = _win_state_entries(state)
+    if entry not in entries:
+        entries.append(entry)
+    state.pop("path_entry_added", None)
+    state["path_entries_added"] = entries
+    _win_state_save(state)
     return True, "added to user PATH (HKCU\\Environment)"
+
+
+# ---- Application Control workaround -------------------------------------------
+def is_policy_block(text: str) -> bool:
+    """True when Windows refused to start a program because of a security policy
+    (WDAC / Smart App Control: WinError 4551; Software Restriction Policy: WinError 1260)."""
+    t = (text or "").lower()
+    return ("winerror 4551" in t or "winerror 1260" in t or "application control" in t
+            or "blocked by group policy" in t)
+
+
+def win_shim_path() -> Path:
+    from mp3cutter.prereqs import managed_root
+    return managed_root() / "bin" / "mp3cut.cmd"
+
+
+def win_create_shim() -> Path:
+    """mp3cut.cmd that runs 'python -m mp3cutter' - works where pip's unsigned mp3cut.exe is blocked."""
+    py = Path(sys.executable)
+    if py.name.lower() == "pythonw.exe":
+        py = py.with_name("python.exe")
+    shim = win_shim_path()
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    text = ("@echo off\r\n"
+            "rem mp3cut launcher, created by the mp3cut installer because Windows Application Control\r\n"
+            "rem blocks the unsigned mp3cut.exe made by pip. Runs mp3cut through your Python instead.\r\n"
+            f'"{py}" -m mp3cutter %*\r\n')
+    try:
+        shim.write_text(text, encoding="oem", newline="")
+    except (LookupError, UnicodeEncodeError):
+        shim.write_text(text, encoding="utf-8", newline="")
+    state = _win_state()
+    state["shim"] = str(shim)
+    _win_state_save(state)
+    return shim
 
 
 def win_remove(assume_yes: bool) -> Tuple[bool, str]:
     sf = _state_file()
     if not sf.exists():
         return False, "no PATH entry was added by the mp3cut installer"
-    try:
-        entry = json.loads(sf.read_text(encoding="utf-8")).get("path_entry_added")
-    except (OSError, ValueError):
-        entry = None
-    if not entry:
+    state = _win_state()
+    entries = _win_state_entries(state)
+    shim = state.get("shim")
+    if not entries and not shim:
         return False, "install state unreadable; leaving PATH unchanged"
     value, typ = _win_read("user")
-    parts = [p for p in value.split(";")]
-    target = pi._norm(entry)
-    keep = [p for p in parts if not (p.strip() and pi._norm(p) == target)]
-    if len(keep) == len(parts):
-        sf.unlink()
-        return False, f"{entry} is no longer in the user PATH"
-    if not ask(f"Remove '{entry}' from your user PATH? (other Python tools installed there would also "
-               f"stop being found)", assume_yes, default=False):
+    parts = value.split(";")
+    targets = {pi._norm(e) for e in entries}
+    keep = [p for p in parts if not (p.strip() and pi._norm(p) in targets)]
+    present = [e for e in entries if any(p.strip() and pi._norm(p) == pi._norm(e) for p in parts)]
+    if present and not ask("Remove from your user PATH: " + "; ".join(present)
+                           + "? (other tools installed in those folders would also stop being found)",
+                           assume_yes, default=False):
         return False, "left PATH unchanged"
-    _win_write_user(";".join(keep), typ)
+    if present:
+        _win_write_user(";".join(keep), typ)
+    if shim and Path(shim).is_file() and Path(shim) == win_shim_path():
+        Path(shim).unlink()
+        try:
+            Path(shim).parent.rmdir()
+        except OSError:
+            pass
     sf.unlink()
-    return True, f"removed {entry} from user PATH"
+    return True, "removed " + ("; ".join(present) if present else "nothing") + " from user PATH" \
+        + (" and the mp3cut.cmd launcher" if shim else "")
 
 
 # ================================================================ verification
@@ -345,13 +417,36 @@ def install_flow(assume_yes: bool = False, change_path: bool = True, install_ffm
     if not ok_exe:
         problems.append(f"{exe} is missing or not executable")
     eff = _effective_path(scripts_dir) if not path_status.startswith(("Not", "NOT")) else os.environ.get("PATH", "")
+    run_prefix: List[str] = []
+    shim = win_shim_path() if system == "Windows" else None
+    if shim is not None and shim.is_file() and pi.dir_in_path_value(shim.parent, _win_read("user")[0]):
+        exe, run_prefix = shim, ["cmd", "/d", "/c"]          # launcher from an earlier run of this installer
+        win_create_shim()                                      # refresh: Python may have moved/upgraded
+        eff = str(shim.parent) + os.pathsep + eff
+    ok_ver, ver_out = _run(run_prefix + [str(exe), "--version"])
+    if system == "Windows" and not ok_ver and is_policy_block(ver_out):
+        print("\nWindows Application Control blocked mp3cut.exe (the unsigned launcher pip creates in\n"
+              f"{scripts_dir}). This is a security policy on this PC, not an mp3cut error.")
+        if ask("Create an 'mp3cut.cmd' launcher that runs mp3cut through your Python instead?",
+               assume_yes, default=True):
+            shim = win_create_shim()
+            changed, msg = win_add(shim.parent, front=True)
+            ok_ver, ver_out = _run(["cmd", "/d", "/c", str(shim), "--version"])
+            if ok_ver:
+                exe, run_prefix = shim, ["cmd", "/d", "/c"]
+                eff = str(shim.parent) + os.pathsep + eff
+                path_status = f"Configured (launcher {shim}, ahead of the blocked mp3cut.exe)"
+                new_terminal = True
+            else:
+                problems.append(f"the mp3cut.cmd launcher also failed: {ver_out[:200]}")
+        else:
+            problems.append("mp3cut.exe is blocked; use:  python -m mp3cutter ...   or re-run install.bat")
+    ok_help, _ = _run(run_prefix + [str(exe), "--help"])
     found = pi.which_mp3cut(eff)
     if found is None:
         problems.append("'mp3cut' is not reachable through PATH yet")
     elif os.path.normcase(os.path.realpath(found)) != os.path.normcase(os.path.realpath(str(exe))):
         problems.append(f"another 'mp3cut' comes first on PATH: {found}  (remove it or reorder PATH)")
-    ok_ver, ver_out = _run([str(exe), "--version"])
-    ok_help, _ = _run([str(exe), "--help"])
     if not (ok_ver and __version__ in ver_out):
         problems.append(f"'mp3cut --version' failed: {ver_out[:200]}")
     if not ok_help:
@@ -379,7 +474,20 @@ def install_flow(assume_yes: bool = False, change_path: bool = True, install_ffm
         ff_status = "NOT FOUND: " + " and ".join(n for n, v in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)) if not v)
         problems.append(install_hint())
 
-    deps_status = "Verified (standard library only)" if ok_ver else "NOT verified"
+    # ---- YouTube prerequisites: yt-dlp (pip dependency) + Deno JavaScript runtime
+    from mp3cutter import youtube
+    from mp3cutter.prereqs import find_deno, offer_deno
+    if install_ffmpeg_prereq and find_deno() is None:
+        offer_deno(assume_yes, non_interactive_default=True, log=print)
+    ytv, ejs, deno = youtube.ytdlp_version(), youtube.ejs_version(), find_deno()
+    if ytv and ejs and deno:
+        yt_status = f"Ready (yt-dlp {ytv}, Deno)"
+    else:
+        missing = [n for n, v in (("yt-dlp", ytv), ("yt-dlp-ejs", ejs), ("Deno", deno)) if not v]
+        yt_status = "Not ready: missing " + ", ".join(missing)
+        problems.append("For YouTube links run:  mp3cut --update-ytdlp")
+
+    deps_status = "Verified" if ok_ver else "NOT verified"
     install_kind = "Virtual environment" if pi.in_venv() else "User-level"
 
     success = ok_exe and ok_ver and ok_help and found is not None and not problems
@@ -392,6 +500,7 @@ def install_flow(assume_yes: bool = False, change_path: bool = True, install_ffm
     print(f"Platform:\n  {system} {pi.os_version()}, {pi.architecture()}, Python {sys.version.split()[0]}\n")
     print(f"PATH:\n  {path_status}\n")
     print(f"FFmpeg:\n  {ff_status}\n")
+    print(f"YouTube links:\n  {yt_status}\n")
     print(f"Dependencies:\n  {deps_status}\n")
     if problems:
         print("To do:")
@@ -422,13 +531,15 @@ def remove_flow(assume_yes: bool = False) -> int:
                     print(f"Removed mp3cut PATH block from {_home_display(f)} (backup: {f.name}.mp3cut.bak)")
         else:
             print("Left shell start-up files unchanged.")
-    from mp3cutter.prereqs import managed_dir, remove_managed
-    if managed_dir().exists():
-        if ask(f"Remove mp3cut's private FFmpeg copy ({managed_dir()})?", assume_yes, default=False):
-            remove_managed()
-            print(f"Removed {managed_dir()}")
+    from mp3cutter.prereqs import deno_dir, managed_dir, remove_all_managed
+    present = [d for d in (managed_dir(), deno_dir()) if d.exists()]
+    if present:
+        if ask("Remove mp3cut's private tools (" + ", ".join(str(d) for d in present) + ")?",
+               assume_yes, default=False):
+            for d in remove_all_managed():
+                print(f"Removed {d}")
         else:
-            print(f"Kept {managed_dir()}")
+            print("Kept " + ", ".join(str(d) for d in present))
     print(f"\nTo uninstall the package:  \"{sys.executable}\" -m pip uninstall mp3cut")
     print("Your MP3 files are never deleted by mp3cut.")
     return 0

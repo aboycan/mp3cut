@@ -104,6 +104,7 @@ fi
 # ---- 3. pip install --user . ------------------------------------------------
 IN_VENV="$("$PY" -c 'import sys; print(int(sys.prefix != getattr(sys, "base_prefix", sys.prefix)))')"
 PIP_ARGS=(install --upgrade --no-warn-script-location)
+EXTRA=""
 if [ "$IN_VENV" = "0" ]; then
   PIP_ARGS+=(--user)
 else
@@ -120,17 +121,24 @@ if ! "$PY" -m pip "${PIP_ARGS[@]}" "$SCRIPT_DIR" 2>&1 | tee "$LOG"; then
     # your home folder and cannot break system packages.
     info "This Python is 'externally managed' (PEP 668). mp3cut has no dependencies, so installing"
     info "it into your user folder is safe; retrying with --break-system-packages."
-    "$PY" -m pip "${PIP_ARGS[@]}" --break-system-packages "$SCRIPT_DIR" || fail "pip install failed (see above)"
+    EXTRA="--break-system-packages"
+    "$PY" -m pip "${PIP_ARGS[@]}" $EXTRA "$SCRIPT_DIR" || fail "pip install failed (see above)"
   elif grep -qi "requirement setuptools" "$LOG" &&
        "$PY" -c 'import setuptools, sys; sys.exit(0 if int(setuptools.__version__.split(".")[0]) >= 61 else 1)' 2>/dev/null; then
     info "PyPI is unreachable; building with the locally installed setuptools instead."
-    "$PY" -m pip "${PIP_ARGS[@]}" --no-build-isolation "$SCRIPT_DIR" || fail "pip install failed (see above)"
+    EXTRA="--no-build-isolation"
+    "$PY" -m pip "${PIP_ARGS[@]}" $EXTRA "$SCRIPT_DIR" || fail "pip install failed (see above)"
   elif grep -qi "requirement setuptools" "$LOG"; then
     fail "pip could not download 'setuptools' (no internet / proxy?). Connect to the internet and re-run."
   else
     fail "pip install failed (see above)"
   fi
 fi
+
+# pip skips a reinstall when the version number is unchanged; force the current source in
+info "Installing the current mp3cut source"
+"$PY" -m pip "${PIP_ARGS[@]}" $EXTRA --no-deps --force-reinstall -q "$SCRIPT_DIR" ||
+  fail "pip reinstall of mp3cut failed (see above)"
 
 # ---- 4. PATH configuration + verification -----------------------------------
 # run from $HOME so the installed package (not the source tree) is imported

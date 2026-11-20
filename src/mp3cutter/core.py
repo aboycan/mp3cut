@@ -383,7 +383,7 @@ def _same_file(a: Path, b: Path) -> bool:
 
 
 def resolve_output(src: Path, output: Optional[str], default_name: str, overwrite: bool,
-                   log: Logger = _noop) -> Path:
+                   log: Logger = _noop, default_dir: Optional[Path] = None) -> Path:
     if output:
         out = Path(output).expanduser()
         if out.is_dir() or output.endswith(("/", "\\", os.sep)):
@@ -396,7 +396,9 @@ def resolve_output(src: Path, output: Optional[str], default_name: str, overwrit
                 out = fixed
             out.parent.mkdir(parents=True, exist_ok=True)
     else:
-        out = src.parent / default_name
+        base = default_dir or src.parent
+        base.mkdir(parents=True, exist_ok=True)
+        out = base / default_name
     if _same_file(src, out) or os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(out)):
         raise Mp3CutError("output would overwrite the input file; choose a different --output")
     if out.exists() and not overwrite:
@@ -406,12 +408,13 @@ def resolve_output(src: Path, output: Optional[str], default_name: str, overwrit
     return out
 
 
-def default_cut_name(src: Path, start: float, end: Optional[float], total: Optional[float], bitrate: str) -> str:
+def default_cut_name(stem: str, is_mp3: bool, start: float, end: Optional[float], total: Optional[float],
+                     bitrate: str) -> str:
     if start == 0 and end is None:
-        return f"{src.stem}.mp3" if src.suffix.lower() != ".mp3" else f"{src.stem}_{bitrate}.mp3"
+        return f"{stem}.mp3" if not is_mp3 else f"{stem}_{bitrate}.mp3"
     stop = end if end is not None else total
     stop_label = time_label(stop) if stop is not None else "end"
-    return f"{src.stem}_{time_label(start)}-{stop_label}.mp3"
+    return f"{stem}_{time_label(start)}-{stop_label}.mp3"
 
 
 @dataclass
@@ -424,13 +427,24 @@ class Job:
     overwrite: bool = False
     show_progress: bool = True
     log: Logger = _noop
+    name: Optional[str] = None          # output name stem (default: input file name); e.g. a video title
+    default_dir: Optional[Path] = None  # where outputs go without --output (default: next to the input)
+
+    @property
+    def stem(self) -> str:
+        return self.name or self.src.stem
+
+    @property
+    def base_dir(self) -> Path:
+        return self.default_dir or self.src.parent
 
 
 def cut(job: Job, start: Optional[float] = None, end: Optional[float] = None,
         duration: Optional[float] = None, output: Optional[str] = None) -> Path:
     start, end = resolve_range(job.info, start, end, duration, job.log)
-    name = default_cut_name(job.src, start, end, job.info.duration, job.bitrate)
-    dst = resolve_output(job.src, output, name, job.overwrite, job.log)
+    is_mp3 = job.name is None and job.src.suffix.lower() == ".mp3"
+    name = default_cut_name(job.stem, is_mp3, start, end, job.info.duration, job.bitrate)
+    dst = resolve_output(job.src, output, name, job.overwrite, job.log, job.default_dir)
     _encode(job.ffmpeg, job.src, dst, start, end, job.info.duration, job.stream, job.bitrate,
             job.show_progress, "Encoding")
     return dst
@@ -460,7 +474,7 @@ def split(job: Job, every: Optional[float] = None, parts: Optional[int] = None,
     if count > MAX_SPLIT_FILES:
         raise Mp3CutError(f"that would create {count} files (limit {MAX_SPLIT_FILES}); use a longer segment")
 
-    out_dir = Path(output).expanduser() if output else job.src.parent / f"{job.src.stem}_parts"
+    out_dir = Path(output).expanduser() if output else job.base_dir / f"{job.stem}_parts"
     if out_dir.exists() and not out_dir.is_dir():
         raise Mp3CutError(f"--output for splitting must be a folder: {out_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -471,7 +485,7 @@ def split(job: Job, every: Optional[float] = None, parts: Optional[int] = None,
         e = stop if i == count - 1 else min(start + (i + 1) * seg, stop)
         if e - s <= 0.01:
             continue
-        name = f"{job.src.stem}_part{i + 1:0{width}d}_{time_label(s)}-{time_label(e)}.mp3"
+        name = f"{job.stem}_part{i + 1:0{width}d}_{time_label(s)}-{time_label(e)}.mp3"
         dst = out_dir / name
         if dst.exists() and not job.overwrite:
             new = _unique(dst)

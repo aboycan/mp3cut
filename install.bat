@@ -75,6 +75,14 @@ if errorlevel 1 (
   echo ERROR: pip install failed - see the messages above.
   goto fail
 )
+rem pip skips a reinstall when the version number is unchanged; force the current source in
+echo =^> Installing the current mp3cut source ...
+call %PY% -m pip install --no-deps --force-reinstall -q --no-warn-script-location %USER_FLAG% "%SCRIPT_DIR%"
+if errorlevel 1 call %PY% -m pip install --no-deps --force-reinstall -q --no-warn-script-location --no-build-isolation %USER_FLAG% "%SCRIPT_DIR%"
+if errorlevel 1 (
+  echo ERROR: pip reinstall of mp3cut failed - see the messages above.
+  goto fail
+)
 
 rem ---- 4. user PATH, FFmpeg prerequisite and verification (run outside the source folder) ----
 pushd "%USERPROFILE%"

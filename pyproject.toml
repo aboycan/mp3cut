@@ -5,12 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mp3cut"
 dynamic = ["version"]
-description = "Cut, split or extract audio from any audio/video file into 320 kbps MP3 (FFmpeg-based)."
+description = "Cut, split or extract audio from any audio/video file or YouTube link into 320 kbps MP3."
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [{ name = "Madhu Kumar", email = "madhu.a@hotmail.com" }]
 license = { text = "MIT" }
-dependencies = []          # standard library only; needs FFmpeg + FFprobe on the system
+dependencies = [
+    "yt-dlp[default]",     # YouTube/link input (includes yt-dlp-ejs); FFmpeg + Deno are fetched by mp3cut itself
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Environment :: Console",

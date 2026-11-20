@@ -13,6 +13,10 @@ Sources (static builds, SHA-256 verified when the publisher provides a checksum)
 
 Mirrors can be used by setting MP3CUT_FFMPEG_URL (and MP3CUT_FFPROBE_URL when
 ffprobe is a separate archive).
+
+The same mechanism provides Deno, the JavaScript runtime yt-dlp needs for YouTube
+(``<data>/mp3cut/deno/``, from https://github.com/denoland/deno/releases, SHA-256
+verified); override with MP3CUT_DENO_URL.
 """
 
 from __future__ import annotations
@@ -60,7 +64,8 @@ def _print(msg: str) -> None:
 
 
 # ----------------------------------------------------------------- locations
-def managed_dir() -> Path:
+def managed_root() -> Path:
+    """mp3cut's private tools folder (FFmpeg, Deno)."""
     system = pi.os_name()
     if system == "Windows":
         base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
@@ -68,7 +73,29 @@ def managed_dir() -> Path:
         base = Path.home() / "Library" / "Application Support"
     else:
         base = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
-    return base / "mp3cut" / "ffmpeg"
+    return base / "mp3cut"
+
+
+def managed_dir() -> Path:
+    return managed_root() / "ffmpeg"
+
+
+def deno_dir() -> Path:
+    return managed_root() / "deno"
+
+
+def managed_deno() -> Optional[Path]:
+    p = deno_dir() / ("deno" + EXE)
+    return p if p.is_file() else None
+
+
+def find_deno() -> Optional[str]:
+    """Deno for yt-dlp: MP3CUT_DENO override, then mp3cut's private copy, then PATH."""
+    override = os.environ.get("MP3CUT_DENO")
+    if override and Path(override).expanduser().is_file():
+        return str(Path(override).expanduser())
+    m = managed_deno()
+    return str(m) if m else shutil.which("deno")
 
 
 def managed_tool(name: str) -> Optional[Path]:
@@ -90,7 +117,8 @@ def is_managed(path: Optional[str]) -> bool:
 class Archive:
     url: str
     tools: Tuple[str, ...]
-    checksum: str          # "sidecar" (<final-url>.sha256), "btbn" (checksums.sha256), or "optional"
+    checksum: str          # "sidecar" (<final-url><sum_suffix>), "btbn" (checksums.sha256), or "optional"
+    sum_suffix: str = ".sha256"
 
 
 def _arch() -> Optional[str]:
@@ -227,7 +255,7 @@ def _expected_hash(archive: Archive, final_url: str) -> Optional[str]:
                 return parts[0].lower()
         return None
     # sidecar: the publisher serves <file>.sha256 next to the real (post-redirect) file
-    for candidate in dict.fromkeys([final_url + ".sha256", archive.url + ".sha256"]):
+    for candidate in dict.fromkeys([final_url + archive.sum_suffix, archive.url + archive.sum_suffix]):
         text = _fetch_text(candidate)
         m = re.search(r"\b[0-9a-fA-F]{64}\b", text or "")
         if m:
@@ -378,3 +406,83 @@ def remove_managed() -> bool:
     except OSError:
         pass
     return True
+
+
+# ===================================================================== Deno
+DENO_BASE = "https://github.com/denoland/deno/releases/latest/download/"
+
+
+def deno_plan() -> List[Archive]:
+    override = os.environ.get("MP3CUT_DENO_URL")
+    if override:
+        return [Archive(override, ("deno",), "optional")]
+    system, arch = pi.os_name(), _arch()
+    cpu = {"x64": "x86_64", "arm64": "aarch64"}.get(arch or "")
+    triple = {"Windows": "pc-windows-msvc", "macOS": "apple-darwin", "Linux": "unknown-linux-gnu"}.get(system)
+    if not cpu or not triple:
+        raise PrereqError(f"no prebuilt Deno for {system} / {platform.machine()}")
+    return [Archive(f"{DENO_BASE}deno-{cpu}-{triple}.zip", ("deno",), "sidecar", ".sha256sum")]
+
+
+def install_deno(log: Logger = _print) -> Path:
+    """Download, verify and install a private Deno (JavaScript runtime used by yt-dlp for YouTube)."""
+    target = deno_dir()
+    target.mkdir(parents=True, exist_ok=True)
+    log(f"Installing Deno (JavaScript runtime for YouTube) into {target}")
+    with tempfile.TemporaryDirectory(prefix="mp3cut-deno-") as tmp_s:
+        tmp = Path(tmp_s)
+        staged = tmp / "bin"
+        staged.mkdir()
+        arc = deno_plan()[0]
+        log(f"  Downloading deno: {arc.url}")
+        path = tmp / "download"
+        final = download(arc.url, path, label="deno           ")
+        _verify(arc, path, final, log)
+        _extract(path, ("deno",), staged)
+        exe = staged / ("deno" + EXE)
+        if pi.os_name() == "macOS" and shutil.which("xattr"):
+            subprocess.run(["xattr", "-d", "com.apple.quarantine", str(exe)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            p = subprocess.run([str(exe), "--version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, encoding="utf-8", errors="replace", timeout=60)
+            ok, out = p.returncode == 0, (p.stdout or "").strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            ok, out = False, str(exc)
+        if not ok:
+            raise PrereqError(f"downloaded deno does not run on this system: {out[:200]}")
+        os.replace(exe, target / ("deno" + EXE))
+        (target / "SOURCE.json").write_text(json.dumps(
+            {"installed_by": f"mp3cut {__version__}", "installed": time.strftime("%Y-%m-%d %H:%M:%S"),
+             "url": final, "version": out.splitlines()[0] if out else ""}, indent=2), encoding="utf-8")
+    log(f"  Deno ready: {out.splitlines()[0] if out else ''}")
+    return target / ("deno" + EXE)
+
+
+def offer_deno(assume_yes: bool = False, non_interactive_default: bool = False, log: Logger = _print) -> bool:
+    log("YouTube downloads need a JavaScript runtime (Deno), which was not found.")
+    if not assume_yes and (not sys.stdin or not sys.stdin.isatty()) and not non_interactive_default:
+        return False
+    if not ask(f"Download Deno for mp3cut now (about 45 MB, into {deno_dir()}, no admin needed)?",
+               assume_yes, default=True):
+        return False
+    try:
+        install_deno(log)
+        return True
+    except PrereqError as exc:
+        log(f"Deno download failed: {exc}")
+        return False
+
+
+def remove_all_managed() -> List[Path]:
+    """Remove mp3cut's private tools (FFmpeg, Deno). Returns the folders removed."""
+    removed = []
+    for d in (managed_dir(), deno_dir()):
+        if d.exists():
+            shutil.rmtree(d)
+            removed.append(d)
+    try:
+        managed_root().rmdir()      # only if now empty
+    except OSError:
+        pass
+    return removed

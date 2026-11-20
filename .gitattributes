@@ -1,0 +1,7 @@
+# Normalise line endings in the repository; check out per platform.
+* text=auto
+*.sh  text eol=lf
+*.bat text eol=crlf
+*.py  text
+*.md  text
+*.toml text

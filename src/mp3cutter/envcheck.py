@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 import sys
+from pathlib import Path
 from typing import List
 
 from mp3cutter import __version__
@@ -14,6 +16,18 @@ from mp3cutter.ffmpeg import find_tool, has_mp3_encoder, install_hint, tool_orig
 
 def _row(label: str, value: object) -> None:
     print(f"  {label:<26}{value}")
+
+
+def _blocked(exe: str) -> bool:
+    import subprocess
+    from mp3cutter.pathsetup import is_policy_block
+    try:
+        subprocess.run([exe, "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        return False
+    except OSError as exc:
+        return is_policy_block(str(exc))
+    except subprocess.SubprocessError:
+        return False
 
 
 def run_check() -> int:
@@ -58,6 +72,13 @@ def run_check() -> int:
                     f"      \"{sys.executable}\" -m mp3cutter.pathsetup install\n"
                     f"    then open a new terminal; or for this terminal only:\n"
                     f"      export PATH=\"{exe.parent}:$PATH\"")
+        elif os.name == "nt" and on_path and on_path.lower().endswith(".exe") and _blocked(on_path):
+            issues.append(f"Windows Application Control / Device Guard blocks {on_path}.\n"
+                          f"    Fix (creates an mp3cut.cmd launcher that runs through your Python):\n"
+                          f"      \"{sys.executable}\" -m mp3cutter.pathsetup install\n"
+                          f"    then open a NEW terminal. Until then use:  python -m mp3cutter ...")
+        elif on_path and on_path.lower().endswith(".cmd"):
+            pass   # mp3cut.cmd launcher (Application Control workaround) - expected
         elif on_path and os.path.normcase(os.path.realpath(on_path)) != os.path.normcase(os.path.realpath(str(exe))):
             issues.append(f"A different mp3cut is found first on PATH: {on_path}\n"
                           f"    Expected: {exe}. Remove the other copy or move {exe.parent} earlier in PATH.")
@@ -76,6 +97,20 @@ def run_check() -> int:
     if not ffmpeg or not ffprobe:
         issues.append("FFmpeg is missing. " + install_hint())
 
+    print("\nYouTube links")
+    from mp3cutter import youtube
+    from mp3cutter.prereqs import deno_dir, find_deno
+    ytv, ejs, deno = youtube.ytdlp_version(), youtube.ejs_version(), find_deno()
+    _row("yt-dlp", ytv or "NOT INSTALLED")
+    _row("yt-dlp-ejs", ejs or "NOT INSTALLED")
+    origin = "mp3cut private copy" if deno and Path(deno).resolve().parent == deno_dir().resolve() else "system"
+    _row("JavaScript runtime", f"deno: {deno} ({origin})" if deno else
+         (f"node: {shutil.which('node')} (fallback)" if shutil.which("node") else "NONE"))
+    if not ytv or not ejs:
+        issues.append("YouTube links need yt-dlp with yt-dlp-ejs. Fix:  mp3cut --update-ytdlp")
+    if not deno and not shutil.which("node"):
+        issues.append("YouTube links need a JavaScript runtime (Deno). Fix:  mp3cut --update-ytdlp")
+
     print("\nPython dependencies")
     for mod in ("mp3cutter.core", "mp3cutter.cli", "json", "subprocess", "argparse", "sysconfig"):
         try:
@@ -84,7 +119,7 @@ def run_check() -> int:
         except Exception as exc:  # pragma: no cover
             _row(mod, f"FAILED ({exc})")
             issues.append(f"Cannot import {mod}: reinstall mp3cut")
-    _row("Third-party packages", "none required")
+    _row("Third-party packages", f"yt-dlp {youtube.ytdlp_version() or 'missing'} (YouTube links only)")
 
     print()
     if issues:

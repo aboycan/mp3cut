@@ -3,11 +3,12 @@
 # mp3cut
 
 Cut, split or extract audio from **any audio or video file** (mp3, wav, flac, m4a, aac, ogg, opus, wma,
-mp4, mkv, mov, avi, webm, …) into **MP3, 320 kbps CBR**. Runs as a plain `mp3cut` command from any
+mp4, mkv, mov, avi, webm, …) **or a YouTube link** into **MP3, 320 kbps CBR**. Runs as a plain `mp3cut` command from any
 folder on Windows 10/11, macOS (Intel and Apple Silicon) and Linux.
 
 ```
 mp3cut --input song.mp3 --start 01:30 --end 02:45
+mp3cut "https://www.youtube.com/watch?v=VIDEO_ID" --start 01:30 --end 02:45
 ```
 
 ## Prerequisites: handled by the installer
@@ -18,9 +19,11 @@ You don't need to install anything first. The installer checks for what's missin
 |---|---|
 | **Python 3.8+** | macOS: installs it with Homebrew (`brew install python`), or starts Apple's Command Line Tools installer. Windows: installs Python for your user with `winget` (no admin). Linux: offers to run your package manager (`apt`/`dnf`/`pacman`/`zypper`/`apk`). This is the only step that can need `sudo`. |
 | **pip** | Runs `ensurepip`. On Linux, falls back to your package manager. |
+| **yt-dlp** (for YouTube links) | Installed by pip together with mp3cut (`yt-dlp[default]`, which includes `yt-dlp-ejs`). |
+| **Deno** (JavaScript runtime YouTube needs) | Downloads a **private copy** (SHA-256 verified, no admin). Node.js is used as a fallback if you decline. |
 | **FFmpeg + FFprobe** (with the MP3 encoder) | Downloads a **private copy just for mp3cut**: no admin rights, and nothing changes system-wide. The SHA-256 checksum is verified and the binaries are test-run before use. |
 
-The private FFmpeg is stored in:
+The private tools are stored under `…/mp3cut/ffmpeg/` and `…/mp3cut/deno/` in:
 
 | OS | Folder | Source |
 |---|---|---|
@@ -103,6 +106,31 @@ resampled, because MPEG-1 Layer III needs one of these for 320 kbps), surround i
 tags are copied, video/subtitles are dropped. mp3cut encodes to a temp file and renames it when done,
 so a failed or cancelled run never leaves a half-written MP3, and it refuses to overwrite its own input.
 
+## YouTube links
+
+Put the link in quotes, because `&` and `?` mean something special to the shell. Every other option works the same:
+
+```
+mp3cut "https://www.youtube.com/watch?v=VIDEO_ID" -s 01:30 -e 02:45
+mp3cut "https://youtu.be/VIDEO_ID" -s 1:30 -d 45          # 45 s from 1:30
+mp3cut "https://youtu.be/VIDEO_ID"                        # whole audio
+mp3cut "https://youtu.be/VIDEO_ID" --split-every 5:00     # 5-minute parts
+mp3cut "https://youtu.be/VIDEO_ID" --info                 # title + length, no download
+mp3cut "https://youtu.be/VIDEO_ID" -s 10 -e 20 -o D:\Music\clip.mp3
+```
+
+- **Output:** `output\<video title>_<start>-<end>.mp3` in the folder you run the command from, for
+  example `output\Paravaledu Paravaledu_00m00s-00m13s.mp3`. Characters that aren't allowed in file
+  names are replaced with `_`. Split parts go into `output\<title>_parts\`. `-o` overrides the location.
+- **Only the audio stream is downloaded**, to a temporary folder that's deleted afterwards. The range is
+  checked against the video's length *before* downloading.
+- A link with `&list=…` uses just that one video. Playlist-only links are rejected.
+- **Quality:** YouTube audio is usually 128–160 kbps (Opus/AAC). The 320 kbps MP3 keeps everything in
+  it but can't add quality that isn't there.
+- **If YouTube downloads start failing** (YouTube changes often), run `mp3cut --update-ytdlp`. It
+  updates yt-dlp and the private Deno.
+- Only download content you have the right to use, and respect YouTube's Terms of Service.
+
 ## Troubleshooting
 
 ```
@@ -121,7 +149,8 @@ python3 -m mp3cutter.pathsetup install        # (re)configure PATH
 ```
 
 To use FFmpeg from a non-standard location, set `MP3CUT_FFMPEG` and `MP3CUT_FFPROBE`.
-If FFmpeg is missing or broken, run `mp3cut --install-ffmpeg`.
+If FFmpeg is missing or broken, run `mp3cut --install-ffmpeg`. For YouTube problems, run
+`mp3cut --update-ytdlp`. `mp3cut --check-env` also shows the yt-dlp, yt-dlp-ejs and Deno status.
 
 ## Uninstall
 
@@ -133,6 +162,9 @@ To also remove the PATH change the installer made, run `./uninstall.sh` or `unin
 `mp3cut --remove-path` before uninstalling. It asks first, and it only removes the marked block or
 the single PATH entry the installer added, plus (if you confirm) mp3cut's private FFmpeg folder. It
 never deletes MP3s, other PATH entries, a system FFmpeg or other files.
+
+`pip uninstall mp3cut` leaves yt-dlp installed, because other tools may use it. Remove it with
+`python -m pip uninstall yt-dlp yt-dlp-ejs` if you don't need it.
 
 ## Development
 
